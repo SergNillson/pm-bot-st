@@ -74,8 +74,8 @@ class PositionManager:
         max_size = bankroll * 0.10  # 10% of capital
         size = max_size / (1 + imbalance * 10)
         
-        # Clamp to $2-8 range for $40 capital (scales with bankroll)
-        scale = bankroll / 40.0
+        # Clamp range scales with bankroll relative to initial capital
+        scale = bankroll / self.initial_capital if self.initial_capital > 0 else 1.0
         min_size = max(MIN_POSITION_SIZE, MIN_POSITION_SIZE * scale)
         max_allowed = min(MAX_POSITION_SIZE * scale, bankroll * MAX_BANKROLL_PER_WINDOW)
         

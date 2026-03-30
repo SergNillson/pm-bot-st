@@ -259,6 +259,8 @@ class DeltaNeutralScalpingStrategy:
         
         Returns True if OK to continue trading, False if should pause.
         """
+        if self.daily_start_bankroll <= 0:
+            return True
         daily_loss_pct = (self.daily_start_bankroll - self.pm.bankroll) / self.daily_start_bankroll
         
         if daily_loss_pct >= DAILY_DRAWDOWN_LIMIT:

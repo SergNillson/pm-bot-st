@@ -1,6 +1,4 @@
-# Polymarket Trading Bot
 
-English | [简体中文](README_CN.md)
 
 A beginner-friendly Python trading bot for Polymarket with gasless transactions and real-time WebSocket data.
 

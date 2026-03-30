@@ -1,0 +1,40 @@
+# Configuration for $40 capital delta-neutral strategy
+# Use with: python strategies/delta_neutral_scalping.py --config config/delta_neutral_config.yaml
+
+capital: 40.0
+asset: BTC
+windows:
+  - 5min
+  - 15min
+
+# Position sizing
+max_position_per_window: 0.15  # 15% of capital
+min_position_size: 2.0         # $2 minimum
+max_position_size: 8.0         # $8 maximum
+
+# Entry conditions
+entry_imbalance_max: 0.20      # Only enter if odds within 20% of 50/50
+min_liquidity: 100             # Minimum $100 in orderbook
+
+# Hedging
+hedge_threshold: 0.15          # Rebalance when delta > 15%
+ladder_ticks: 3                # Split orders into 3 ticks
+
+# Risk management
+daily_drawdown_limit: 0.08     # 8% daily loss → pause
+order_timeout: 10              # Cancel orders after 10 seconds
+min_win_rate: 0.52             # Pause if win rate < 52%
+
+# Time preferences
+low_liquidity_hours:           # 2-4 AM ET
+  start: 2
+  end: 4
+  size_multiplier: 1.2         # 20% larger positions during these hours
+
+# Telegram notifications
+telegram:
+  enabled: true
+  notify_on_entry: true
+  notify_on_exit: true
+  notify_on_pnl: true
+  notify_on_errors: true

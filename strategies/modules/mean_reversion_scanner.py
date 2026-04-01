@@ -19,15 +19,17 @@ class MeanReversionScanner:
     reason, it tends to revert.  This scanner flags those situations.
     """
 
-    def __init__(self, clob_client, threshold: float = 0.08):
+    def __init__(self, clob_client, threshold: float = 0.08, dry_run: bool = False):
         """
         Args:
             clob_client: CLOBClient instance (reserved for future lookups).
             threshold: Minimum distance from 0.50 to trigger a signal.
                 Default 0.08 means flag if price < 0.42 or price > 0.58.
+            dry_run: When True, log intended orders without placing real ones.
         """
         self.clob = clob_client
         self.threshold = threshold  # 0.08 = 8 cents from 0.50
+        self.dry_run = dry_run
 
     def check_signal(
         self, up_price: float, down_price: float
@@ -91,3 +93,37 @@ class MeanReversionScanner:
         """
         profit_per_unit = target - entry_price
         return profit_per_unit * size
+
+    async def execute(
+        self,
+        bot,
+        token_id: str,
+        price: float,
+        size: float,
+        target: float = 0.50,
+    ) -> Dict:
+        """Execute mean reversion trade (buy underpriced side).
+
+        Args:
+            bot: TradingBot instance for order execution.
+            token_id: Token to buy.
+            price: Entry price.
+            size: Position size in USDC.
+            target: Target price for profit (default 0.50).
+
+        Returns:
+            Order result dict.
+        """
+        expected_profit = (target - price) * size
+
+        logger.info(
+            f"📉 MR ENTRY: price={price:.4f} → target={target:.4f} | "
+            f"size=${size:.2f} | expected_profit=+${expected_profit:.2f}"
+        )
+
+        if self.dry_run:
+            logger.info(f"🛡️ DRY RUN: Would BUY {size} @ {price:.4f}")
+            return {"success": True, "order_id": "dry_run_mr"}
+
+        result = await bot.place_order(token_id, price, size, "BUY")
+        return result

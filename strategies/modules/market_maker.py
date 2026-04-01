@@ -23,7 +23,7 @@ class MarketMaker:
         If both fill: profit = spread per unit.
     """
 
-    def __init__(self, bot, clob_client, spread: float = 0.03):
+    def __init__(self, bot, clob_client, spread: float = 0.03, dry_run: bool = False):
         """
         Args:
             bot: TradingBot instance for order execution.
@@ -31,10 +31,12 @@ class MarketMaker:
             spread: Total bid-ask spread to apply (default 0.03 = 3 cents).
                 Half is subtracted from mid for the buy price; half is added
                 for the sell price.
+            dry_run: When True, log intended orders without placing real ones.
         """
         self.bot = bot
         self.clob = clob_client
         self.spread = spread  # 3-cent total spread
+        self.dry_run = dry_run
 
     async def place_orders(
         self,
@@ -60,6 +62,14 @@ class MarketMaker:
         logger.info(
             f"📊 MARKET MAKING: BUY @ {buy_price:.4f} | SELL @ {sell_price:.4f}"
         )
+
+        if self.dry_run:
+            logger.info(f"🛡️ DRY RUN: Would BUY {size} @ {buy_price:.4f}")
+            logger.info(f"🛡️ DRY RUN: Would SELL {size} @ {sell_price:.4f}")
+            return {
+                "buy": {"success": True, "order_id": "dry_run_buy"},
+                "sell": {"success": True, "order_id": "dry_run_sell"},
+            }
 
         buy_result = await self.bot.place_order(token_id, buy_price, size, "BUY")
         sell_result = await self.bot.place_order(token_id, sell_price, size, "SELL")

@@ -113,9 +113,15 @@ class HybridStrategy:
         self.closer = PositionCloser(self.gamma, self.clob, self.pm)
 
         # Sub-strategy modules
-        self.arb_detector = ArbitrageDetector(self.clob, threshold=arb_threshold)
-        self.market_maker = MarketMaker(self.bot, self.clob, spread=mm_spread)
-        self.mr_scanner = MeanReversionScanner(self.clob, threshold=mr_threshold)
+        self.arb_detector = ArbitrageDetector(
+            self.clob, threshold=arb_threshold, dry_run=dry_run
+        )
+        self.market_maker = MarketMaker(
+            self.bot, self.clob, spread=mm_spread, dry_run=dry_run
+        )
+        self.mr_scanner = MeanReversionScanner(
+            self.clob, threshold=mr_threshold, dry_run=dry_run
+        )
 
         # Performance tracking
         self.stats: Dict = {

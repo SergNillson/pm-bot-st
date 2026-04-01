@@ -1,153 +1,201 @@
-"""
-Odds Monitor Module - Real-time odds tracking and entry condition checking.
-"""
-
+"""Odds monitoring module for tracking market prices."""
 import logging
-from typing import Optional, Dict, Tuple
-from collections import defaultdict, deque
 import time
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Risk parameters
-ENTRY_IMBALANCE_MAX = 0.20   # Only enter within 20% of 50/50
-MIN_LIQUIDITY = 100          # Minimum $100 in orderbook
-
 
 class OddsMonitor:
-    """Real-time odds tracking via WebSocket.
+    """Monitor and track odds/prices for market tokens."""
     
-    Monitors bid/ask prices for Up and Down tokens and provides:
-    - Current odds and imbalance calculations
-    - Entry condition checks (odds gates)
-    - Liquidity checks
-    - Price history tracking
-    """
-    
-    def __init__(self, websocket_client):
-        """
-        Args:
-            websocket_client: An instance of MarketWebSocket
-        """
-        self.ws = websocket_client
-        # Price history: {token_id: deque of (timestamp, price)}
-        self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
-    
-    def get_current_odds(
-        self, up_token: str, down_token: str
-    ) -> Dict[str, Optional[float]]:
-        """Get current odds for both sides of a market.
+    def __init__(self, clob_client=None):
+        """Initialize with optional CLOB client for direct price fetching.
         
         Args:
-            up_token: Token ID for the UP outcome
-            down_token: Token ID for the DOWN outcome
+            clob_client: CLOBClient instance for fetching prices via REST API
+        """
+        self.clob = clob_client
+        self.price_history: Dict[str, list] = {}
+        self.last_prices: Dict[str, float] = {}
+        self.last_fetch_time: Dict[str, float] = {}
+        self.fetch_interval = 2.0  # Fetch prices every 2 seconds
+    
+    def record_price(self, asset_id: str, price: float) -> None:
+        """Record a price for an asset."""
+        if price is None or price <= 0:
+            return
         
+        self.last_prices[asset_id] = price
+        
+        if asset_id not in self.price_history:
+            self.price_history[asset_id] = []
+        
+        self.price_history[asset_id].append({
+            'price': price,
+            'timestamp': time.time()
+        })
+        
+        # Keep only last 100 prices
+        if len(self.price_history[asset_id]) > 100:
+            self.price_history[asset_id] = self.price_history[asset_id][-100:]
+    
+    def fetch_price(self, asset_id: str) -> Optional[float]:
+        """Fetch price from CLOB API if available.
+        
+        Args:
+            asset_id: Token ID
+            
+        Returns:
+            Price (0.0-1.0) or None
+        """
+        if not self.clob:
+            return None
+        
+        now = time.time()
+        last_fetch = self.last_fetch_time.get(asset_id, 0)
+        
+        # Rate limit: don't fetch more than once per fetch_interval
+        if now - last_fetch < self.fetch_interval:
+            return self.last_prices.get(asset_id)
+        
+        price = self.clob.get_price(asset_id)
+        
+        if price is not None:
+            self.record_price(asset_id, price)
+            self.last_fetch_time[asset_id] = now
+            logger.debug(f"Fetched price for {asset_id[:20]}...: {price:.4f}")
+        
+        return price
+    
+    def get_last_price(self, asset_id: str) -> Optional[float]:
+        """Get last recorded price for an asset, fetching if needed.
+        
+        Args:
+            asset_id: Token ID
+            
+        Returns:
+            Price (0.0-1.0) or None
+        """
+        # Try to fetch fresh price from CLOB
+        if self.clob:
+            price = self.fetch_price(asset_id)
+            if price is not None:
+                return price
+        
+        # Fallback to cached price
+        return self.last_prices.get(asset_id)
+    
+    def get_current_odds(self, up_token: str, down_token: str) -> Dict:
+        """Get current odds for Up and Down tokens.
+        
+        Args:
+            up_token: Up token ID
+            down_token: Down token ID
+            
         Returns:
             {
-                'up': float or None,
-                'down': float or None,
-                'imbalance': float,  # abs(up_price - 0.50)
-                'valid': bool,       # True if we have prices for both sides
+                'up': float,        # Normalized probability 0.0-1.0
+                'down': float,      # Normalized probability 0.0-1.0
+                'imbalance': float, # abs(up - down)
+                'valid': bool       # Whether data is valid
             }
         """
-        up_price = self.ws.get_mid_price(up_token)
-        down_price = self.ws.get_mid_price(down_token)
+        up_price = self.get_last_price(up_token)
+        down_price = self.get_last_price(down_token)
         
-        if up_price is not None and down_price is not None:
-            imbalance = abs(up_price - 0.50)
-            return {
-                "up": up_price,
-                "down": down_price,
-                "imbalance": imbalance,
-                "valid": True,
-            }
+        if up_price is None or down_price is None:
+            logger.debug(f"Missing prices: up={up_price}, down={down_price}")
+            return {'up': 0, 'down': 0, 'imbalance': 1.0, 'valid': False}
+        
+        # Normalize to ensure sum = 1.0
+        total = up_price + down_price
+        if total <= 0:
+            logger.debug(f"Invalid total: {total}")
+            return {'up': 0, 'down': 0, 'imbalance': 1.0, 'valid': False}
+        
+        up_norm = up_price / total
+        down_norm = down_price / total
+        
+        imbalance = abs(up_norm - down_norm)
         
         return {
-            "up": up_price,
-            "down": down_price,
-            "imbalance": 1.0,  # Max imbalance if no data
-            "valid": False,
+            'up': up_norm,
+            'down': down_norm,
+            'imbalance': imbalance,
+            'valid': True
         }
     
-    def check_entry_conditions(self, up_token: str, down_token: str) -> bool:
-        """Check whether current odds allow entry.
-        
-        Entry conditions:
-        1. Both prices available
-        2. Imbalance <= ENTRY_IMBALANCE_MAX (within 20% of 50/50)
-        3. Sufficient liquidity in orderbook
+    def check_entry_conditions(self, up_token: str, down_token: str, max_imbalance: float = 0.20) -> bool:
+        """Check if market conditions are suitable for entry.
         
         Args:
-            up_token: Token ID for the UP outcome
-            down_token: Token ID for the DOWN outcome
+            up_token: Up token ID
+            down_token: Down token ID
+            max_imbalance: Maximum allowed imbalance (default 0.20 = 20%)
         
         Returns:
-            True if entry conditions are met
+            True if conditions are good for entry
         """
         odds = self.get_current_odds(up_token, down_token)
         
-        if not odds["valid"]:
-            logger.debug("Entry rejected: no price data available")
+        if not odds['valid']:
+            logger.debug("Odds not valid")
             return False
         
-        if odds["imbalance"] > ENTRY_IMBALANCE_MAX:
+        if odds['imbalance'] > max_imbalance:
             logger.debug(
-                f"Entry rejected: imbalance {odds['imbalance']:.3f} > {ENTRY_IMBALANCE_MAX}"
+                f"Imbalance too high: {odds['imbalance']:.3f} > {max_imbalance:.3f}"
             )
-            return False
-        
-        # Check liquidity
-        if not self._check_liquidity(up_token) or not self._check_liquidity(down_token):
-            logger.debug("Entry rejected: insufficient liquidity")
             return False
         
         return True
     
-    def _check_liquidity(self, token_id: str) -> bool:
-        """Check if there is sufficient liquidity in the orderbook."""
-        ob = self.ws.get_orderbook(token_id)
-        if ob is None:
-            return False
-        
-        total_liquidity = ob.get_total_bid_liquidity() + ob.get_total_ask_liquidity()
-        return total_liquidity >= MIN_LIQUIDITY
-    
     def get_entry_size_category(self, imbalance: float) -> str:
-        """Get size category based on odds imbalance.
+        """Categorize entry based on imbalance.
         
-        Returns one of: 'optimal', 'good', 'fair', 'poor', 'skip'
+        Returns: 'optimal', 'good', 'fair', or 'risky'
         """
-        if imbalance <= 0.02:
-            return "optimal"   # 48-52%
-        elif imbalance <= 0.05:
-            return "good"      # 45-55%
+        if imbalance <= 0.05:
+            return 'optimal'
         elif imbalance <= 0.10:
-            return "fair"      # 40-60%
+            return 'good'
         elif imbalance <= 0.15:
-            return "poor"      # 35-65%
+            return 'fair'
         else:
-            return "skip"      # Too risky
+            return 'risky'
     
-    def record_price(self, token_id: str, price: float):
-        """Record a price observation for historical tracking."""
-        self.price_history[token_id].append((time.time(), price))
-    
-    def get_price_trend(self, token_id: str, seconds: int = 30) -> Optional[float]:
-        """Get price trend over the last N seconds.
+    def get_price_trend(self, asset_id: str, lookback_seconds: float = 60.0) -> Optional[float]:
+        """Calculate price trend (slope) over recent history.
         
         Returns:
-            Positive = price going up, Negative = going down, None = not enough data
+            Positive = uptrend, Negative = downtrend, None = insufficient data
         """
-        history = self.price_history.get(token_id)
-        if not history or len(history) < 2:
+        if asset_id not in self.price_history:
             return None
         
-        cutoff = time.time() - seconds
-        recent = [(t, p) for t, p in history if t >= cutoff]
+        history = self.price_history[asset_id]
+        if len(history) < 2:
+            return None
+        
+        now = time.time()
+        recent = [h for h in history if now - h['timestamp'] <= lookback_seconds]
         
         if len(recent) < 2:
             return None
         
-        oldest_price = recent[0][1]
-        newest_price = recent[-1][1]
-        return newest_price - oldest_price
+        # Simple linear regression slope
+        prices = [h['price'] for h in recent]
+        n = len(prices)
+        
+        x_mean = (n - 1) / 2
+        y_mean = sum(prices) / n
+        
+        numerator = sum((i - x_mean) * (prices[i] - y_mean) for i in range(n))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+        
+        if denominator == 0:
+            return 0.0
+        
+        slope = numerator / denominator
+        return slope

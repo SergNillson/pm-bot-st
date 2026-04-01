@@ -4,6 +4,7 @@ Delta Hedger Module - Dynamic delta hedging logic.
 
 import asyncio
 import logging
+import time
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -26,17 +27,42 @@ class DeltaHedger:
         - Buy 150% on underweight side
     """
     
-    def __init__(self, bot, websocket_client, position_manager):
+    def __init__(self, bot, websocket_client, position_manager, clob_client=None):
         """
         Args:
             bot: TradingBot instance for order execution
-            websocket_client: MarketWebSocket for price data
+            websocket_client: MarketWebSocket for price data (deprecated)
             position_manager: PositionManager for position tracking
+            clob_client: CLOBClient for price data via REST API
         """
         self.bot = bot
         self.ws = websocket_client
         self.pm = position_manager
+        self.clob = clob_client
         self.hedge_count = 0
+    
+    def get_price(self, token_id: str) -> float:
+        """Get current price for a token.
+        
+        Uses CLOB API if available, otherwise falls back to WebSocket or default.
+        
+        Args:
+            token_id: Token ID
+            
+        Returns:
+            Price (0.0-1.0)
+        """
+        if self.clob:
+            price = self.clob.get_price(token_id)
+            if price is not None:
+                return price
+        
+        if self.ws and hasattr(self.ws, 'get_mid_price'):
+            price = self.ws.get_mid_price(token_id)
+            if price is not None:
+                return price
+        
+        return 0.50  # Default to 50/50
     
     def calculate_delta(
         self,
@@ -59,12 +85,18 @@ class DeltaHedger:
                 up_value = up_price * up_size
                 down_value = down_price * down_size
         """
-        up_price = self.ws.get_mid_price(up_token) or 0.50
-        down_price = self.ws.get_mid_price(down_token) or 0.50
+        up_price = self.get_price(up_token)
+        down_price = self.get_price(down_token)
         
         up_value = up_price * up_size
         down_value = down_price * down_size
         delta = up_value - down_value
+        
+        logger.debug(
+            f"Delta calc: up={up_price:.4f}×{up_size:.2f}=${up_value:.2f}, "
+            f"down={down_price:.4f}×{down_size:.2f}=${down_value:.2f}, "
+            f"delta=${delta:.2f}"
+        )
         
         return delta, up_value, down_value
     
@@ -83,6 +115,11 @@ class DeltaHedger:
         """
         position = self.pm.get_position(market_id)
         if not position:
+            return False
+        
+        # Check cooldown (don't hedge more than once per 10 seconds)
+        last_hedge_time = position.get("last_hedge_time", 0)
+        if time.time() - last_hedge_time < 10:
             return False
         
         up_size = position.get("up", {}).get("size", 0)
@@ -125,6 +162,10 @@ class DeltaHedger:
                 overweight_size, underweight_size,
                 market_id
             )
+            
+            # Update last hedge time
+            position["last_hedge_time"] = time.time()
+            
             return True
         
         return False
@@ -162,8 +203,8 @@ class DeltaHedger:
         )
         
         # Get current prices
-        overweight_price = self.ws.get_mid_price(overweight_token) or 0.50
-        underweight_price = self.ws.get_mid_price(underweight_token) or 0.50
+        overweight_price = self.get_price(overweight_token)
+        underweight_price = self.get_price(underweight_token)
         
         # Execute sell on overweight side
         sell_result = await self.pm._place_order(
@@ -180,6 +221,24 @@ class DeltaHedger:
             
             if buy_result.get("success"):
                 logger.info(f"✅ Rebalanced successfully (hedge #{self.hedge_count})")
+                
+                # UPDATE POSITION SIZES AFTER HEDGING
+                position = self.pm.get_position(market_id)
+                if position:
+                    # Determine which side is up/down
+                    if position.get("up", {}).get("token") == overweight_token:
+                        # UP was overweight
+                        position["up"]["size"] -= sell_size
+                        position["down"]["size"] += buy_size
+                    else:
+                        # DOWN was overweight
+                        position["down"]["size"] -= sell_size
+                        position["up"]["size"] += buy_size
+                    
+                    logger.debug(
+                        f"Updated position sizes: up={position['up']['size']:.2f}, "
+                        f"down={position['down']['size']:.2f}"
+                    )
             else:
                 logger.warning(
                     f"⚠️ Sell succeeded but buy failed: {buy_result.get('message', '')}"

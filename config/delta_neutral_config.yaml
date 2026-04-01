@@ -13,7 +13,7 @@ min_position_size: 2.0         # $2 minimum
 max_position_size: 8.0         # $8 maximum
 
 # Entry conditions
-entry_imbalance_max: 0.20      # Only enter if odds within 20% of 50/50
+entry_imbalance_max: 0.25      # Only enter if odds within 20% of 50/50
 min_liquidity: 100             # Minimum $100 in orderbook
 
 # Hedging

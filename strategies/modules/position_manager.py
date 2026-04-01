@@ -26,15 +26,17 @@ class PositionManager:
     - Low-liquidity hours detection
     """
     
-    def __init__(self, bot, websocket_client=None, initial_capital: float = 40.0):
+    def __init__(self, bot, websocket_client=None, clob_client=None, initial_capital: float = 40.0):
         """
         Args:
             bot: TradingBot instance for order execution
-            websocket_client: MarketWebSocket for price data
+            websocket_client: MarketWebSocket for price data (deprecated)
+            clob_client: CLOBClient for price data via REST API
             initial_capital: Starting capital in USDC (default $40)
         """
         self.bot = bot
         self.ws = websocket_client
+        self.clob = clob_client
         self.initial_capital = initial_capital
         
         # Position tracking: {market_id: {'up': {...}, 'down': {...}}}
@@ -164,13 +166,20 @@ class PositionManager:
         orders = []
         size_per_tick = total_size / ticks
         
-        # Get base price from WebSocket
+        # Get base price from CLOB API (preferred) or WebSocket (fallback)
         base_price = None
-        if self.ws:
+        
+        if self.clob:
+            base_price = self.clob.get_price(token_id)
+            if base_price:
+                logger.debug(f"Got price from CLOB: {base_price:.4f}")
+        
+        if base_price is None and self.ws and hasattr(self.ws, 'get_mid_price'):
             base_price = self.ws.get_mid_price(token_id)
         
         if base_price is None:
             base_price = 0.50  # Default to 50/50
+            logger.warning(f"No price available for {token_id[:20]}..., using default 0.50")
         
         for i in range(ticks):
             price = round(base_price + (i * 0.01), 4)

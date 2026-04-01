@@ -43,7 +43,8 @@ import pytz
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.gamma_client import GammaClient
-from src.websocket_client import MarketWebSocket
+from src.websocket_client import PolymarketWebSocketClient
+from src.clob_client import CLOBClient
 from src.utils import create_bot_from_env, setup_logging
 from strategies.modules.market_scanner import MarketScanner
 from strategies.modules.odds_monitor import OddsMonitor
@@ -88,7 +89,7 @@ class TelegramNotifier:
             payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=5) as resp:
-                    return resp.status == 200
+                    return resp.status_code == 200
         except ImportError:
             logger.debug("aiohttp not installed - Telegram disabled")
             return False
@@ -185,12 +186,14 @@ class DeltaNeutralScalpingStrategy:
         
         # Core components
         self.gamma = GammaClient()
-        self.ws = MarketWebSocket()
+        self.ws = PolymarketWebSocketClient()
+        self.clob = CLOBClient()
         self.bot = None
         
         self.scanner = MarketScanner(self.gamma)
-        self.monitor = OddsMonitor(self.ws)
-        self.pm = PositionManager(None, self.ws, initial_capital=capital)
+        self.monitor = OddsMonitor(self.clob)
+        self.pm = PositionManager(None, self.ws, self.clob, initial_capital=capital)
+        
         self.pm.dry_run = dry_run
         self.hedger = None  # Initialized after bot is created
         
@@ -235,12 +238,7 @@ class DeltaNeutralScalpingStrategy:
             self.pm.dry_run = True
         
         # Initialize delta hedger
-        self.hedger = DeltaHedger(self.bot, self.ws, self.pm)
-        
-        # Register WebSocket handlers
-        @self.ws.on_book
-        async def on_book(snapshot):
-            self.monitor.record_price(snapshot.asset_id, snapshot.mid_price)
+        self.hedger = DeltaHedger(self.bot, self.ws, self.pm, self.clob)
         
         logger.info("✅ Strategy initialized")
     
@@ -297,17 +295,6 @@ class DeltaNeutralScalpingStrategy:
         
         logger.info(f"Found {len(markets)} active {self.coin} markets")
         
-        # Collect all token IDs
-        token_ids = []
-        for market in markets:
-            if market.get("up_token"):
-                token_ids.append(market["up_token"])
-            if market.get("down_token"):
-                token_ids.append(market["down_token"])
-        
-        if token_ids:
-            await self.ws.subscribe(token_ids)
-        
         return markets
     
     async def _process_market(self, market: Dict) -> None:
@@ -322,6 +309,7 @@ class DeltaNeutralScalpingStrategy:
         # Micro-window scalping: max 4 trades per window
         trade_count = self.market_trade_counts.get(market_id, 0)
         if trade_count >= 4:
+            logger.debug(f"Market {market.get('window')} reached max trades (4)")
             return
         
         # Check if we already have a position in this market
@@ -330,13 +318,36 @@ class DeltaNeutralScalpingStrategy:
             await self.hedger.check_and_rebalance(market_id, up_token, down_token)
             return
         
+        # Fetch current prices
+        up_price_raw = self.monitor.get_last_price(up_token)
+        down_price_raw = self.monitor.get_last_price(down_token)
+        
+        logger.debug(
+            f"Market {market.get('window')}: "
+            f"up_price={up_price_raw}, down_price={down_price_raw}"
+        )
+        
+        if up_price_raw is None or down_price_raw is None:
+            logger.warning(
+                f"⚠️ No prices available yet for {market.get('window')} - "
+                f"waiting for CLOB API data..."
+            )
+            return
+        
         # Check entry conditions
-        if not self.monitor.check_entry_conditions(up_token, down_token):
+        if not self.monitor.check_entry_conditions(up_token, down_token, max_imbalance=ENTRY_IMBALANCE_MAX):
+            odds = self.monitor.get_current_odds(up_token, down_token)
+            logger.debug(
+                f"Entry conditions not met: up={odds['up']:.3f}, "
+                f"down={odds['down']:.3f}, imbalance={odds['imbalance']:.3f} "
+                f"(max={ENTRY_IMBALANCE_MAX:.3f})"
+            )
             return
         
         # Get current odds
         odds = self.monitor.get_current_odds(up_token, down_token)
         if not odds["valid"]:
+            logger.debug("Invalid odds")
             return
         
         up_price = odds["up"]
@@ -398,8 +409,8 @@ class DeltaNeutralScalpingStrategy:
         
         Runs continuously:
         1. Find active markets
-        2. Subscribe to WebSocket
-        3. Monitor and trade
+        2. Monitor prices via CLOB API
+        3. Trade when conditions are met
         4. Hedge positions
         5. Respect risk limits
         """
@@ -408,9 +419,6 @@ class DeltaNeutralScalpingStrategy:
         self.daily_start_bankroll = self.pm.bankroll
         
         logger.info("🚀 Delta-Neutral Scalping Strategy running. Press Ctrl+C to stop.")
-        
-        # Start WebSocket in background
-        ws_task = asyncio.create_task(self.ws.run(auto_reconnect=True))
         
         try:
             iteration = 0
@@ -454,6 +462,8 @@ class DeltaNeutralScalpingStrategy:
                         await self._process_market(market)
                     except Exception as e:
                         logger.error(f"Error processing market {market}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                 
                 # Periodic stats report
                 await self._report_stats_periodically()
@@ -465,15 +475,11 @@ class DeltaNeutralScalpingStrategy:
             logger.info("Strategy stopped by user")
         except Exception as e:
             logger.error(f"Fatal error in main loop: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             await self.notifier.notify_error(e)
         finally:
             self.is_running = False
-            ws_task.cancel()
-            try:
-                await ws_task
-            except asyncio.CancelledError:
-                pass
-            await self.ws.disconnect()
             
             # Final stats
             stats = self.pm.get_stats()
@@ -528,7 +534,7 @@ def parse_args():
 async def main():
     """Main entry point."""
     args = parse_args()
-    setup_logging("INFO")
+    setup_logging("INFO")  # Изменено обратно на INFO
     
     strategy = DeltaNeutralScalpingStrategy(
         capital=args.capital,

@@ -77,13 +77,14 @@ class PositionCloser:
     async def close_position(self, market_id: str, position: Dict) -> Optional[float]:
         """Close a single position and calculate P&L.
 
-        Fetches final prices from the CLOB API, computes P&L assuming an
-        average entry price of 0.50 (delta-neutral straddle), updates the
-        bankroll, and removes the position from PositionManager.
+        Fetches final prices from the CLOB API, computes P&L using actual
+        tracked costs (total_cost and total_received), updates the bankroll,
+        and removes the position from PositionManager.
 
         Args:
             market_id: Market identifier
-            position: Position dict with 'up' and 'down' sub-dicts
+            position: Position dict with 'up', 'down', 'total_cost', and
+                'total_received' sub-dicts/fields
 
         Returns:
             Total P&L for the closed position, or None on error
@@ -101,15 +102,23 @@ class PositionCloser:
             up_price = self._get_price(up_token)
             down_price = self._get_price(down_token)
 
-            # P&L calculation: profit vs assumed 50/50 entry
-            up_pnl = (up_price - AVG_ENTRY_PRICE) * up_size
-            down_pnl = (down_price - AVG_ENTRY_PRICE) * down_size
-            total_pnl = up_pnl + down_pnl
+            # Get total money spent and received (tracks real entry + hedge costs)
+            total_cost = position.get("total_cost", 0.0)
+            total_received = position.get("total_received", 0.0)
+
+            # Calculate final settlement value
+            up_value = up_price * up_size
+            down_value = down_price * down_size
+            settlement_value = up_value + down_value
+
+            # Real P&L = (settlement + hedge profits) - initial cost
+            total_pnl = (settlement_value + total_received) - total_cost
 
             logger.info(
                 f"💰 Closing position: market={market_id[:20]}... | "
-                f"UP: {up_size:.2f} @ {up_price:.3f} = ${up_pnl:+.2f} | "
-                f"DOWN: {down_size:.2f} @ {down_price:.3f} = ${down_pnl:+.2f} | "
+                f"Spent: ${total_cost:.2f} | "
+                f"Hedge proceeds: ${total_received:.2f} | "
+                f"Settlement: ${settlement_value:.2f} | "
                 f"Total P&L: ${total_pnl:+.2f}"
             )
 

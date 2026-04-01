@@ -373,8 +373,10 @@ class TestDeltaHedger:
         # UP at 80%, DOWN at 20% → large delta
         hedger, pm = self.make_hedger(up_price=0.80, down_price=0.20)
         pm.positions["market_1"] = {
-            "up": {"token": "up_t", "size": 20.0},
+            "up": {"token": "up_t", "size": 20.0, "entry_time": time.time()},
             "down": {"token": "down_t", "size": 20.0},
+            "total_cost": 20.0,
+            "total_received": 0.0,
         }
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -416,6 +418,8 @@ class TestPositionCloser:
         return {
             "up": {"token": up_token, "size": size, "entry_time": old_time},
             "down": {"token": down_token, "size": size, "entry_time": old_time},
+            "total_cost": size * 1.0,   # size shares bought at ~0.50 each side
+            "total_received": 0.0,
         }
 
     def _fresh_position(self, up_token="up_t", down_token="down_t", size=2.0):
@@ -423,6 +427,8 @@ class TestPositionCloser:
         return {
             "up": {"token": up_token, "size": size, "entry_time": time.time()},
             "down": {"token": down_token, "size": size, "entry_time": time.time()},
+            "total_cost": size * 1.0,   # size shares bought at ~0.50 each side
+            "total_received": 0.0,
         }
 
     def test_initialization(self):
@@ -452,10 +458,9 @@ class TestPositionCloser:
 
     @pytest.mark.asyncio
     async def test_close_position_calculates_balanced_pnl(self):
-        # up_price=0.98, down_price=0.02, size=2 each
-        # up_pnl  = (0.98 - 0.50) * 2 = +0.96
-        # down_pnl = (0.02 - 0.50) * 2 = -0.96
-        # total_pnl = 0.0
+        # up_price=0.98, down_price=0.02, size=2 each, total_cost=2.0
+        # settlement  = 0.98*2 + 0.02*2 = 2.00
+        # total_pnl   = (2.00 + 0.0) - 2.0 = 0.0
         closer, pm = self.make_closer(up_price=0.98, down_price=0.02)
         pm.positions["market_1"] = self._expired_position(size=2.0)
         position = pm.positions["market_1"]
@@ -466,10 +471,9 @@ class TestPositionCloser:
 
     @pytest.mark.asyncio
     async def test_close_position_zero_pnl_large_position(self):
-        # up_price=0.80, down_price=0.20, size=5 each
-        # up_pnl  = (0.80 - 0.50) * 5 = +1.50
-        # down_pnl = (0.20 - 0.50) * 5 = -1.50
-        # total_pnl = 0.0
+        # up_price=0.80, down_price=0.20, size=5 each, total_cost=5.0
+        # settlement  = 0.80*5 + 0.20*5 = 5.00
+        # total_pnl   = (5.00 + 0.0) - 5.0 = 0.0
         closer, pm = self.make_closer(up_price=0.80, down_price=0.20)
         pm.positions["market_2"] = self._expired_position(size=5.0)
         position = pm.positions["market_2"]
@@ -480,9 +484,8 @@ class TestPositionCloser:
     @pytest.mark.asyncio
     async def test_close_position_updates_bankroll(self):
         # up_price=0.60, down_price=0.60 → both sides profitable
-        # up_pnl  = (0.60 - 0.50) * 2 = +0.20
-        # down_pnl = (0.60 - 0.50) * 2 = +0.20
-        # total_pnl = +0.40
+        # settlement  = 0.60*2 + 0.60*2 = 2.40, total_cost=2.0
+        # total_pnl   = (2.40 + 0.0) - 2.0 = +0.40
         closer, pm = self.make_closer(up_price=0.60, down_price=0.60)
         pm.positions["market_3"] = self._expired_position(size=2.0)
         position = pm.positions["market_3"]

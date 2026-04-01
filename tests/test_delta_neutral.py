@@ -310,6 +310,77 @@ class TestPositionManager:
         assert stats["wins"] == 0
         assert stats["losses"] == 0
 
+    def test_record_hedge_sell(self):
+        pm = self.make_pm()
+        pm.positions["market_1"] = {
+            "up": {}, "down": {},
+            "total_cost": 0.0, "total_received": 0.0,
+        }
+        pm.record_hedge_sell("market_1", 1.5, 0.625)
+        sells = pm.positions["market_1"]["hedge_sells"]
+        assert len(sells) == 1
+        assert sells[0] == (1.5, 0.625)
+
+    def test_record_hedge_sell_nonexistent_market(self):
+        pm = self.make_pm()
+        # Should not raise any exception and positions dict should remain unchanged
+        pm.record_hedge_sell("no_market", 1.0, 0.50)
+        assert "no_market" not in pm.positions
+
+    def test_record_hedge_buy(self):
+        pm = self.make_pm()
+        pm.positions["market_1"] = {
+            "up": {}, "down": {},
+            "total_cost": 0.0, "total_received": 0.0,
+        }
+        pm.record_hedge_buy("market_1", 0.75, 0.375)
+        buys = pm.positions["market_1"]["hedge_buys"]
+        assert len(buys) == 1
+        assert buys[0] == (0.75, 0.375)
+
+    def test_record_hedge_buy_nonexistent_market(self):
+        pm = self.make_pm()
+        # Should not raise any exception and positions dict should remain unchanged
+        pm.record_hedge_buy("no_market", 1.0, 0.50)
+        assert "no_market" not in pm.positions
+
+    def test_get_total_hedge_proceeds_no_hedges(self):
+        pm = self.make_pm()
+        pm.positions["market_1"] = {"up": {}, "down": {}}
+        proceeds = pm.get_total_hedge_proceeds("market_1")
+        assert proceeds == pytest.approx(0.0)
+
+    def test_get_total_hedge_proceeds_with_hedges(self):
+        pm = self.make_pm()
+        pm.positions["market_1"] = {
+            "up": {}, "down": {},
+            "hedge_sells": [(1.2, 0.625)],   # sold 1.2 @ 0.625 = $0.75
+            "hedge_buys": [(0.6, 0.375)],    # bought 0.6 @ 0.375 = $0.225
+        }
+        proceeds = pm.get_total_hedge_proceeds("market_1")
+        # net = 0.75 - 0.225 = 0.525
+        assert proceeds == pytest.approx(0.525)
+
+    def test_get_total_hedge_proceeds_nonexistent_market(self):
+        pm = self.make_pm()
+        proceeds = pm.get_total_hedge_proceeds("no_market")
+        assert proceeds == pytest.approx(0.0)
+
+    def test_record_multiple_hedge_transactions(self):
+        pm = self.make_pm()
+        pm.positions["market_1"] = {
+            "up": {}, "down": {},
+            "total_cost": 0.0, "total_received": 0.0,
+        }
+        pm.record_hedge_sell("market_1", 1.0, 0.60)
+        pm.record_hedge_sell("market_1", 0.5, 0.65)
+        pm.record_hedge_buy("market_1", 0.8, 0.40)
+        assert len(pm.positions["market_1"]["hedge_sells"]) == 2
+        assert len(pm.positions["market_1"]["hedge_buys"]) == 1
+        # net = (1.0*0.60 + 0.5*0.65) - (0.8*0.40) = (0.60 + 0.325) - 0.32 = 0.605
+        proceeds = pm.get_total_hedge_proceeds("market_1")
+        assert proceeds == pytest.approx(0.605)
+
 
 # ============================================================================
 # Delta Hedger Tests
@@ -395,6 +466,30 @@ class TestDeltaHedger:
         hedger, pm = self.make_hedger()
         stats = hedger.get_hedge_stats()
         assert stats["hedge_count"] == 0
+
+    def test_hedge_threshold_is_ten_percent(self):
+        from strategies.modules.delta_hedger import HEDGE_THRESHOLD
+        assert HEDGE_THRESHOLD == pytest.approx(0.10)
+
+    @pytest.mark.asyncio
+    async def test_rebalance_records_hedge_transactions(self):
+        # UP at 80%, DOWN at 20% → large delta triggers rebalance
+        hedger, pm = self.make_hedger(up_price=0.80, down_price=0.20)
+        pm.positions["market_1"] = {
+            "up": {"token": "up_t", "size": 20.0, "entry_time": time.time()},
+            "down": {"token": "down_t", "size": 20.0},
+            "total_cost": 20.0,
+            "total_received": 0.0,
+        }
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await hedger.check_and_rebalance("market_1", "up_t", "down_t")
+
+        assert result is True
+        position = pm.get_position("market_1")
+        assert position is not None
+        assert len(position.get("hedge_sells", [])) == 1
+        assert len(position.get("hedge_buys", [])) == 1
 
 
 # ============================================================================

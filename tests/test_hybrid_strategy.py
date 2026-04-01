@@ -23,6 +23,12 @@ class TestArbitrageDetector:
         detector = ArbitrageDetector(clob, threshold=0.95)
         assert detector.clob is clob
         assert detector.threshold == pytest.approx(0.95)
+        assert detector.dry_run is False
+
+    def test_initialization_dry_run(self):
+        clob = MagicMock()
+        detector = ArbitrageDetector(clob, threshold=0.95, dry_run=True)
+        assert detector.dry_run is True
 
     def test_check_opportunity_detected(self):
         detector = self.make_detector(threshold=0.95)
@@ -64,6 +70,34 @@ class TestArbitrageDetector:
         assert detector.check_opportunity(0.46, 0.46) is False
         # total = 0.89 → below the 0.90 threshold → opportunity
         assert detector.check_opportunity(0.44, 0.45) is True
+
+    @pytest.mark.asyncio
+    async def test_execute_dry_run(self):
+        clob = MagicMock()
+        detector = ArbitrageDetector(clob, threshold=0.95, dry_run=True)
+        bot = MagicMock()
+
+        result = await detector.execute(bot, "up_tok", "down_tok", 0.45, 0.48, 6.0)
+
+        bot.place_order.assert_not_called()
+        assert result["up"]["success"] is True
+        assert result["down"]["success"] is True
+        assert result["up"]["order_id"] == "dry_run_up"
+        assert result["down"]["order_id"] == "dry_run_down"
+
+    @pytest.mark.asyncio
+    async def test_execute_live(self):
+        clob = MagicMock()
+        detector = ArbitrageDetector(clob, threshold=0.95, dry_run=False)
+        bot = MagicMock()
+        bot.place_order = AsyncMock(return_value=MagicMock())
+
+        await detector.execute(bot, "up_tok", "down_tok", 0.45, 0.48, 6.0)
+
+        assert bot.place_order.call_count == 2
+        calls = bot.place_order.call_args_list
+        assert calls[0].args[0] == "up_tok"
+        assert calls[1].args[0] == "down_tok"
 
 
 # ============================================================================
@@ -140,6 +174,34 @@ class TestMeanReversionScanner:
         result = scanner.check_signal(0.39, 0.61)
         assert result is not None
 
+    def test_initialization_dry_run(self):
+        clob = MagicMock()
+        scanner = MeanReversionScanner(clob, threshold=0.08, dry_run=True)
+        assert scanner.dry_run is True
+
+    @pytest.mark.asyncio
+    async def test_execute_dry_run(self):
+        clob = MagicMock()
+        scanner = MeanReversionScanner(clob, threshold=0.08, dry_run=True)
+        bot = MagicMock()
+
+        result = await scanner.execute(bot, "tok_up", 0.42, 5.0, target=0.50)
+
+        bot.place_order.assert_not_called()
+        assert result["success"] is True
+        assert result["order_id"] == "dry_run_mr"
+
+    @pytest.mark.asyncio
+    async def test_execute_live(self):
+        clob = MagicMock()
+        scanner = MeanReversionScanner(clob, threshold=0.08, dry_run=False)
+        bot = MagicMock()
+        bot.place_order = AsyncMock(return_value=MagicMock())
+
+        await scanner.execute(bot, "tok_up", 0.42, 5.0, target=0.50)
+
+        bot.place_order.assert_called_once_with("tok_up", 0.42, 5.0, "BUY")
+
 
 # ============================================================================
 # MarketMaker Tests
@@ -157,6 +219,13 @@ class TestMarketMaker:
         assert mm.bot is bot
         assert mm.clob is clob
         assert mm.spread == pytest.approx(0.03)
+        assert mm.dry_run is False
+
+    def test_initialization_dry_run(self):
+        bot = MagicMock()
+        clob = MagicMock()
+        mm = MarketMaker(bot, clob, spread=0.03, dry_run=True)
+        assert mm.dry_run is True
 
     def test_should_make_market_balanced(self):
         mm, _, _ = self.make_mm()
@@ -174,6 +243,20 @@ class TestMarketMaker:
         mm, _, _ = self.make_mm()
         # exactly at 0.45 and 0.55 → should return True
         assert mm.should_make_market(0.45, 0.55) is True
+
+    @pytest.mark.asyncio
+    async def test_place_orders_dry_run(self):
+        bot = MagicMock()
+        clob = MagicMock()
+        mm = MarketMaker(bot, clob, spread=0.04, dry_run=True)
+
+        result = await mm.place_orders("token_123", 0.50, 5.0)
+
+        bot.place_order.assert_not_called()
+        assert result["buy"]["success"] is True
+        assert result["sell"]["success"] is True
+        assert result["buy"]["order_id"] == "dry_run_buy"
+        assert result["sell"]["order_id"] == "dry_run_sell"
 
     @pytest.mark.asyncio
     async def test_place_orders_calls_bot(self):
@@ -240,6 +323,20 @@ class TestHybridStrategy:
         assert strategy.stats["arb_trades"] == 0
         assert strategy.stats["mr_trades"] == 0
         assert strategy.stats["mm_trades"] == 0
+
+    def test_dry_run_propagates_to_modules(self):
+        """dry_run flag should be forwarded to all sub-strategy modules."""
+        strategy = self._make_strategy(dry_run=True)
+        assert strategy.arb_detector.dry_run is True
+        assert strategy.market_maker.dry_run is True
+        assert strategy.mr_scanner.dry_run is True
+
+    def test_live_mode_modules_not_dry_run(self):
+        """Modules should have dry_run=False when strategy is in live mode."""
+        strategy = self._make_strategy(dry_run=False)
+        assert strategy.arb_detector.dry_run is False
+        assert strategy.market_maker.dry_run is False
+        assert strategy.mr_scanner.dry_run is False
 
     def test_calculate_size_arbitrage(self):
         strategy = self._make_strategy()

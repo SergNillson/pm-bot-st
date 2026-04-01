@@ -1,11 +1,13 @@
 """Tests for delta-neutral scalping strategy modules."""
 import asyncio
 import pytest
+import time
 from unittest.mock import MagicMock, AsyncMock, patch
 from strategies.modules.market_scanner import MarketScanner
 from strategies.modules.odds_monitor import OddsMonitor
 from strategies.modules.position_manager import PositionManager
 from strategies.modules.delta_hedger import DeltaHedger
+from strategies.modules.position_closer import PositionCloser, POSITION_EXPIRY_SECONDS, AVG_ENTRY_PRICE
 
 
 # ============================================================================
@@ -391,3 +393,159 @@ class TestDeltaHedger:
         hedger, pm = self.make_hedger()
         stats = hedger.get_hedge_stats()
         assert stats["hedge_count"] == 0
+
+
+# ============================================================================
+# Position Closer Tests
+# ============================================================================
+class TestPositionCloser:
+    def make_closer(self, up_price=0.98, down_price=0.02):
+        gamma = MagicMock()
+        clob = MagicMock()
+        clob.get_price.side_effect = lambda t: up_price if "up" in t else down_price
+        bot = MagicMock()
+        ws = MagicMock()
+        pm = PositionManager(bot, ws, initial_capital=40.0)
+        pm.dry_run = True
+        closer = PositionCloser(gamma, clob, pm)
+        return closer, pm
+
+    def _expired_position(self, up_token="up_t", down_token="down_t", size=2.0):
+        """Return a position dict whose entry_time is in the past."""
+        old_time = time.time() - POSITION_EXPIRY_SECONDS - 10
+        return {
+            "up": {"token": up_token, "size": size, "entry_time": old_time},
+            "down": {"token": down_token, "size": size, "entry_time": old_time},
+        }
+
+    def _fresh_position(self, up_token="up_t", down_token="down_t", size=2.0):
+        """Return a position dict that has NOT expired yet."""
+        return {
+            "up": {"token": up_token, "size": size, "entry_time": time.time()},
+            "down": {"token": down_token, "size": size, "entry_time": time.time()},
+        }
+
+    def test_initialization(self):
+        gamma, clob, pm = MagicMock(), MagicMock(), MagicMock()
+        closer = PositionCloser(gamma, clob, pm)
+        assert closer.gamma is gamma
+        assert closer.clob is clob
+        assert closer.pm is pm
+
+    def test_get_price_uses_clob(self):
+        closer, pm = self.make_closer(up_price=0.75)
+        price = closer._get_price("up_t")
+        assert price == pytest.approx(0.75)
+
+    def test_get_price_defaults_when_clob_returns_none(self):
+        closer, pm = self.make_closer()
+        closer.clob.get_price.side_effect = None
+        closer.clob.get_price.return_value = None
+        price = closer._get_price("unknown_token")
+        assert price == pytest.approx(0.50)
+
+    def test_get_price_defaults_when_no_clob(self):
+        gamma, pm = MagicMock(), MagicMock()
+        closer = PositionCloser(gamma, None, pm)
+        price = closer._get_price("some_token")
+        assert price == pytest.approx(0.50)
+
+    @pytest.mark.asyncio
+    async def test_close_position_calculates_balanced_pnl(self):
+        # up_price=0.98, down_price=0.02, size=2 each
+        # up_pnl  = (0.98 - 0.50) * 2 = +0.96
+        # down_pnl = (0.02 - 0.50) * 2 = -0.96
+        # total_pnl = 0.0
+        closer, pm = self.make_closer(up_price=0.98, down_price=0.02)
+        pm.positions["market_1"] = self._expired_position(size=2.0)
+        position = pm.positions["market_1"]
+
+        pnl = await closer.close_position("market_1", position)
+
+        assert pnl == pytest.approx(0.0, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_close_position_zero_pnl_large_position(self):
+        # up_price=0.80, down_price=0.20, size=5 each
+        # up_pnl  = (0.80 - 0.50) * 5 = +1.50
+        # down_pnl = (0.20 - 0.50) * 5 = -1.50
+        # total_pnl = 0.0
+        closer, pm = self.make_closer(up_price=0.80, down_price=0.20)
+        pm.positions["market_2"] = self._expired_position(size=5.0)
+        position = pm.positions["market_2"]
+
+        pnl = await closer.close_position("market_2", position)
+        assert pnl == pytest.approx(0.0, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_close_position_updates_bankroll(self):
+        # up_price=0.60, down_price=0.60 → both sides profitable
+        # up_pnl  = (0.60 - 0.50) * 2 = +0.20
+        # down_pnl = (0.60 - 0.50) * 2 = +0.20
+        # total_pnl = +0.40
+        closer, pm = self.make_closer(up_price=0.60, down_price=0.60)
+        pm.positions["market_3"] = self._expired_position(size=2.0)
+        position = pm.positions["market_3"]
+        initial_bankroll = pm.bankroll
+
+        pnl = await closer.close_position("market_3", position)
+
+        assert pnl == pytest.approx(0.40)
+        assert pm.bankroll == pytest.approx(initial_bankroll + 0.40)
+
+    @pytest.mark.asyncio
+    async def test_close_position_removes_from_pm(self):
+        closer, pm = self.make_closer()
+        pm.positions["market_4"] = self._expired_position()
+        position = pm.positions["market_4"]
+
+        await closer.close_position("market_4", position)
+
+        assert pm.get_position("market_4") is None
+
+    @pytest.mark.asyncio
+    async def test_check_and_close_expired_closes_expired(self):
+        closer, pm = self.make_closer()
+        pm.positions["old_market"] = self._expired_position()
+
+        closed = await closer.check_and_close_expired()
+
+        assert "old_market" in closed
+        assert pm.get_position("old_market") is None
+
+    @pytest.mark.asyncio
+    async def test_check_and_close_expired_keeps_fresh(self):
+        closer, pm = self.make_closer()
+        pm.positions["fresh_market"] = self._fresh_position()
+
+        closed = await closer.check_and_close_expired()
+
+        assert "fresh_market" not in closed
+        assert pm.get_position("fresh_market") is not None
+
+    @pytest.mark.asyncio
+    async def test_check_and_close_expired_mixed(self):
+        closer, pm = self.make_closer()
+        pm.positions["old"] = self._expired_position()
+        pm.positions["new"] = self._fresh_position()
+
+        closed = await closer.check_and_close_expired()
+
+        assert "old" in closed
+        assert "new" not in closed
+        assert pm.get_position("old") is None
+        assert pm.get_position("new") is not None
+
+    @pytest.mark.asyncio
+    async def test_check_and_close_expired_no_positions(self):
+        closer, pm = self.make_closer()
+        closed = await closer.check_and_close_expired()
+        assert closed == []
+
+    @pytest.mark.asyncio
+    async def test_close_position_handles_error_gracefully(self):
+        closer, pm = self.make_closer()
+        # Pass a malformed position to trigger an error
+        result = await closer.close_position("bad_market", None)
+        assert result is None
+

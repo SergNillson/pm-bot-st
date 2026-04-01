@@ -50,6 +50,7 @@ from strategies.modules.market_scanner import MarketScanner
 from strategies.modules.odds_monitor import OddsMonitor
 from strategies.modules.position_manager import PositionManager
 from strategies.modules.delta_hedger import DeltaHedger
+from strategies.modules.position_closer import PositionCloser
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,7 @@ class DeltaNeutralScalpingStrategy:
         
         self.pm.dry_run = dry_run
         self.hedger = None  # Initialized after bot is created
+        self.closer = None  # Initialized after bot is created
         
         # Telegram
         self.notifier = TelegramNotifier(
@@ -239,6 +241,9 @@ class DeltaNeutralScalpingStrategy:
         
         # Initialize delta hedger
         self.hedger = DeltaHedger(self.bot, self.ws, self.pm, self.clob)
+        
+        # Initialize position closer
+        self.closer = PositionCloser(self.gamma, self.clob, self.pm)
         
         logger.info("✅ Strategy initialized")
     
@@ -464,6 +469,12 @@ class DeltaNeutralScalpingStrategy:
                         logger.error(f"Error processing market {market}: {e}")
                         import traceback
                         logger.error(traceback.format_exc())
+                
+                # Check and close expired positions
+                try:
+                    await self.closer.check_and_close_expired()
+                except Exception as e:
+                    logger.error(f"Error closing positions: {e}")
                 
                 # Periodic stats report
                 await self._report_stats_periodically()

@@ -17,7 +17,7 @@ entry_imbalance_max: 0.25      # Only enter if odds within 20% of 50/50
 min_liquidity: 100             # Minimum $100 in orderbook
 
 # Hedging
-hedge_threshold: 0.15          # Rebalance when delta > 15%
+hedge_threshold: 0.10          # Rebalance when delta > 10%
 ladder_ticks: 3                # Split orders into 3 ticks
 
 # Risk management

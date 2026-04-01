@@ -111,13 +111,18 @@ class PositionCloser:
             down_value = down_price * down_size
             settlement_value = up_value + down_value
 
+            # Compute hedge buy and sell totals for detailed logging
+            hedge_sells = sum(s * p for s, p in position.get("hedge_sells", []))
+            hedge_buys = sum(s * p for s, p in position.get("hedge_buys", []))
+
             # Real P&L = (settlement + hedge profits) - initial cost
             total_pnl = (settlement_value + total_received) - total_cost
 
             logger.info(
                 f"💰 Closing position: market={market_id[:20]}... | "
-                f"Spent: ${total_cost:.2f} | "
-                f"Hedge proceeds: ${total_received:.2f} | "
+                f"Initial spent: ${total_cost:.2f} | "
+                f"Hedge buys: ${hedge_buys:.2f} | "
+                f"Hedge sells: ${hedge_sells:.2f} | "
                 f"Settlement: ${settlement_value:.2f} | "
                 f"Total P&L: ${total_pnl:+.2f}"
             )

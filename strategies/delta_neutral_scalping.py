@@ -217,6 +217,11 @@ class DeltaNeutralScalpingStrategy:
         
         # Per-market trade counting (micro-window scalping)
         self.market_trade_counts: Dict[str, int] = {}
+        
+        # Hedge tracking
+        self.total_hedges: int = 0
+        self.positions_hedged: int = 0
+        self._hedged_market_ids: set = set()
     
     async def initialize(self) -> None:
         """Initialize strategy components."""
@@ -320,7 +325,10 @@ class DeltaNeutralScalpingStrategy:
         # Check if we already have a position in this market
         if self.pm.get_position(market_id):
             # Run delta hedging on existing position
-            await self.hedger.check_and_rebalance(market_id, up_token, down_token)
+            hedged = await self.hedger.check_and_rebalance(market_id, up_token, down_token)
+            if hedged:
+                self.total_hedges += 1
+                self._hedged_market_ids.add(market_id)
             return
         
         # Fetch current prices
@@ -400,11 +408,16 @@ class DeltaNeutralScalpingStrategy:
             stats = self.pm.get_stats()
             stats.update(self.hedger.get_hedge_stats() if self.hedger else {})
             
+            total_trades = stats['total_trades']
+            hedge_rate = (self.positions_hedged / total_trades * 100) if total_trades > 0 else 0
+            
             logger.info(
                 f"📊 Stats: bankroll=${stats['bankroll']:.2f} | "
                 f"P&L=${stats['total_pnl']:+.2f} | "
                 f"win_rate={stats['win_rate']:.1%} | "
-                f"trades={stats['total_trades']}"
+                f"trades={total_trades} | "
+                f"hedge_rate={hedge_rate:.1f}% | "
+                f"total_hedges={self.total_hedges}"
             )
             await self.notifier.notify_stats(stats)
             self.last_stats_report = now
@@ -472,7 +485,11 @@ class DeltaNeutralScalpingStrategy:
                 
                 # Check and close expired positions
                 try:
-                    await self.closer.check_and_close_expired()
+                    closed = await self.closer.check_and_close_expired()
+                    for mid in closed:
+                        if mid in self._hedged_market_ids:
+                            self.positions_hedged += 1
+                            self._hedged_market_ids.discard(mid)
                 except Exception as e:
                     logger.error(f"Error closing positions: {e}")
                 
@@ -494,6 +511,8 @@ class DeltaNeutralScalpingStrategy:
             
             # Final stats
             stats = self.pm.get_stats()
+            total_trades = stats['total_trades']
+            hedge_rate = (self.positions_hedged / total_trades * 100) if total_trades > 0 else 0
             logger.info(f"Final stats: {stats}")
             print(f"\n{'='*50}")
             print(f"  Final Statistics")
@@ -502,8 +521,9 @@ class DeltaNeutralScalpingStrategy:
             print(f"  Final Bankroll:   ${stats['bankroll']:.2f}")
             print(f"  Total P&L:        ${stats['total_pnl']:+.2f}")
             print(f"  Win Rate:         {stats['win_rate']:.1%}")
-            print(f"  Total Trades:     {stats['total_trades']}")
-            print(f"  Hedge Count:      {self.hedger.hedge_count if self.hedger else 0}")
+            print(f"  Total Trades:     {total_trades}")
+            print(f"  Hedge Count:      {self.total_hedges}")
+            print(f"  Hedge Rate:       {hedge_rate:.1f}%")
 
 
 # ============================================================================

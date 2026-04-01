@@ -138,6 +138,8 @@ class PositionManager:
             },
             "total_cost": 0.0,      # Total USDC spent
             "total_received": 0.0,  # Total USDC received from sells
+            "hedge_sells": [],       # List of (size, price) for hedge sells
+            "hedge_buys": [],        # List of (size, price) for hedge buys
         }
         
         # Accumulate entry costs from straddle orders
@@ -232,6 +234,51 @@ class PositionManager:
             "message": result.message,
             "cost": price * size if side == "BUY" else -(price * size),
         }
+    
+    def record_hedge_sell(self, market_id: str, size: float, price: float) -> None:
+        """Record a hedge SELL transaction.
+        
+        Args:
+            market_id: Market identifier
+            size: Size sold
+            price: Price per unit
+        """
+        if market_id in self.positions:
+            if 'hedge_sells' not in self.positions[market_id]:
+                self.positions[market_id]['hedge_sells'] = []
+            self.positions[market_id]['hedge_sells'].append((size, price))
+            logger.info(f"Recorded hedge SELL: {size} @ {price:.4f}")
+    
+    def record_hedge_buy(self, market_id: str, size: float, price: float) -> None:
+        """Record a hedge BUY transaction.
+        
+        Args:
+            market_id: Market identifier
+            size: Size bought
+            price: Price per unit
+        """
+        if market_id in self.positions:
+            if 'hedge_buys' not in self.positions[market_id]:
+                self.positions[market_id]['hedge_buys'] = []
+            self.positions[market_id]['hedge_buys'].append((size, price))
+            logger.info(f"Recorded hedge BUY: {size} @ {price:.4f}")
+    
+    def get_total_hedge_proceeds(self, market_id: str) -> float:
+        """Calculate net proceeds from hedging (sells - buys).
+        
+        Args:
+            market_id: Market identifier
+        
+        Returns:
+            Net hedge proceeds (positive means net profit from hedging)
+        """
+        if market_id not in self.positions:
+            return 0.0
+        
+        pos = self.positions[market_id]
+        hedge_sells = sum(size * price for size, price in pos.get('hedge_sells', []))
+        hedge_buys = sum(size * price for size, price in pos.get('hedge_buys', []))
+        return hedge_sells - hedge_buys
     
     def update_bankroll(self, pnl: float) -> float:
         """Update bankroll with profit/loss (compound interest).

@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # Hedging parameters
-HEDGE_THRESHOLD = 0.20   # Rebalance when delta > 20% of total value
+HEDGE_THRESHOLD = 0.10   # Rebalance when delta > 10% of total value
 SELL_FRACTION = 0.40     # Sell 40% of overweight side
 BUY_FRACTION = 1.20      # Buy 120% on underweight side
 
@@ -256,6 +256,10 @@ class DeltaHedger:
                     position["total_received"] -= sell_cost  # sell_cost is negative, so this adds
                     # _place_order returns cost = price*size for BUY (positive = spent)
                     position["total_cost"] += buy_result.get("cost", 0)
+                    
+                    # Record hedge transactions for detailed P&L tracking
+                    self.pm.record_hedge_sell(market_id, sell_size, overweight_price)
+                    self.pm.record_hedge_buy(market_id, buy_size, underweight_price)
             else:
                 logger.warning(
                     f"⚠️ Sell succeeded but buy failed: {buy_result.get('message', '')}"

@@ -10,9 +10,9 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # Hedging parameters
-HEDGE_THRESHOLD = 0.15   # Rebalance when delta > 15% of total value
-SELL_FRACTION = 0.60     # Sell 60% of overweight side
-BUY_FRACTION = 1.50      # Buy 150% on underweight side
+HEDGE_THRESHOLD = 0.20   # Rebalance when delta > 20% of total value
+SELL_FRACTION = 0.40     # Sell 40% of overweight side
+BUY_FRACTION = 1.20      # Buy 120% on underweight side
 
 
 class DeltaHedger:
@@ -117,9 +117,18 @@ class DeltaHedger:
         if not position:
             return False
         
-        # Check cooldown (don't hedge more than once per 10 seconds)
+        # Check cooldown (don't hedge more than once per 20 seconds)
         last_hedge_time = position.get("last_hedge_time", 0)
-        if time.time() - last_hedge_time < 10:
+        if time.time() - last_hedge_time < 20:
+            return False
+        
+        # Don't hedge if less than 60 seconds remain in the window
+        # Default to time.time() so positions without entry_time are always eligible
+        entry_time = position.get("up", {}).get("entry_time", time.time())
+        time_elapsed = time.time() - entry_time
+
+        if time_elapsed > 240:  # More than 4 minutes elapsed (5min window)
+            logger.debug("Too close to settlement, skipping hedge")
             return False
         
         up_size = position.get("up", {}).get("size", 0)
@@ -239,6 +248,14 @@ class DeltaHedger:
                         f"Updated position sizes: up={position['up']['size']:.2f}, "
                         f"down={position['down']['size']:.2f}"
                     )
+                    
+                    # Track hedge costs.
+                    # _place_order returns cost = -(price*size) for SELL (negative = received),
+                    # so subtracting it adds the received amount to total_received.
+                    sell_cost = sell_result.get("cost", 0)
+                    position["total_received"] -= sell_cost  # sell_cost is negative, so this adds
+                    # _place_order returns cost = price*size for BUY (positive = spent)
+                    position["total_cost"] += buy_result.get("cost", 0)
             else:
                 logger.warning(
                     f"⚠️ Sell succeeded but buy failed: {buy_result.get('message', '')}"

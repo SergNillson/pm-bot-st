@@ -136,7 +136,14 @@ class PositionManager:
                 "size": size,
                 "entry_time": time.time(),
             },
+            "total_cost": 0.0,      # Total USDC spent
+            "total_received": 0.0,  # Total USDC received from sells
         }
+        
+        # Accumulate entry costs from straddle orders
+        for order in up_orders + down_orders:
+            if order.get("success"):
+                self.positions[market_id]["total_cost"] += order.get("cost", 0)
         
         return {"up_orders": up_orders, "down_orders": down_orders}
     
@@ -211,6 +218,7 @@ class PositionManager:
                 "side": side,
                 "token_id": token_id,
                 "dry_run": True,
+                "cost": price * size if side == "BUY" else -(price * size),
             }
         
         result = await self.bot.place_order(token_id, price, size, side)
@@ -222,6 +230,7 @@ class PositionManager:
             "side": side,
             "token_id": token_id,
             "message": result.message,
+            "cost": price * size if side == "BUY" else -(price * size),
         }
     
     def update_bankroll(self, pnl: float) -> float:

@@ -1,0 +1,43 @@
+# Configuration for Hybrid Strategy with $40 starting capital
+# Usage: python strategies/hybrid_strategy.py --config config/hybrid_config.yaml
+
+strategy:
+  name: hybrid_strategy
+  coin: BTC
+  timeframes: [5m]
+  dry_run: true
+
+capital:
+  initial: 40.0
+  min_trade: 2.0
+  max_trade: 8.0
+  max_positions: 3
+
+arbitrage:
+  enabled: true
+  threshold: 0.95          # Buy both outcomes if total < 0.95
+  min_profit: 0.03         # Minimum 3% expected profit required
+  size_multiplier: 1.5     # Use 150% of normal size (low risk)
+
+mean_reversion:
+  enabled: true
+  threshold: 0.08          # 8-cent deviation from 0.50 triggers entry
+  target: 0.50
+  stop_loss: 0.03          # 3-cent stop loss
+  take_profit: 0.08        # 8-cent take profit target
+
+market_making:
+  enabled: true
+  spread: 0.03             # 3-cent total spread (1.5 cents each side)
+  min_volume: 100          # Only enter if market has $100+ volume
+  max_exposure: 0.10       # Maximum 10% of capital in market making
+
+risk_management:
+  max_bankroll_per_position: 0.15
+  daily_loss_limit: 0.08
+  max_drawdown: 0.20
+  position_timeout: 330    # Close positions after 5.5 minutes
+
+logging:
+  level: INFO
+  stats_interval: 60       # Print performance stats every 60 seconds

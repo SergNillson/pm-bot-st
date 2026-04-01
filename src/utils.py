@@ -2,7 +2,7 @@
 import logging
 import os
 import re
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +35,14 @@ def format_size(size: float, decimals: int = 2) -> str:
     return f"{size:.{decimals}f}"
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: Union[str, int] = "INFO") -> None:
     """Configure logging for the bot."""
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    if isinstance(level, int):
+        numeric_level = level
+    elif isinstance(level, str):
+        numeric_level = getattr(logging, level.upper(), logging.INFO)
+    else:
+        numeric_level = logging.INFO
     logging.basicConfig(
         level=numeric_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

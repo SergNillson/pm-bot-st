@@ -61,9 +61,12 @@ MAX_BANKROLL_PER_WINDOW = 0.15   # 15% of total capital
 DAILY_DRAWDOWN_LIMIT    = 0.08   # 8% → pause bot for 4 hours
 ORDER_TIMEOUT_SECONDS   = 10     # cancel unfilled orders
 MIN_WIN_RATE            = 0.52   # pause if win rate drops below
-ENTRY_IMBALANCE_MAX     = 0.20   # only enter within 20% of 50/50
+ENTRY_IMBALANCE_MAX     = 0.10   # only enter within 10% of 50/50 (45-55% range) - STRICTER
+MIN_SPREAD_THRESHOLD    = 0.06   # maximum spread to enter; wider spreads are too costly
 HEDGE_THRESHOLD         = 0.15   # delta trigger for rebalancing
 MIN_LIQUIDITY           = 100    # minimum $100 in orderbook to enter
+EARLY_EXIT_PROFIT_THRESHOLD = 0.15   # exit early if position profit exceeds 15% of net cost
+EARLY_EXIT_PRICE_ADJUSTMENT = 0.99   # apply 1% price haircut on early exit sells
 
 
 # ============================================================================
@@ -357,6 +360,15 @@ class DeltaNeutralScalpingStrategy:
             )
             return
         
+        # Check spread - avoid entering when transaction costs are too high
+        spread = abs(up_price_raw - down_price_raw) if up_price_raw and down_price_raw else 1.0
+        if spread > MIN_SPREAD_THRESHOLD:
+            logger.debug(
+                f"Spread too wide: {spread:.4f} > {MIN_SPREAD_THRESHOLD:.4f}, "
+                f"skipping entry to avoid high transaction costs"
+            )
+            return
+        
         # Get current odds
         odds = self.monitor.get_current_odds(up_token, down_token)
         if not odds["valid"]:
@@ -400,6 +412,91 @@ class DeltaNeutralScalpingStrategy:
         
         # Send Telegram notification
         await self.notifier.notify_entry(market, up_price, down_price, size)
+    
+    async def _check_early_exit(self, market_id: str, up_token: str, down_token: str) -> bool:
+        """Check if we should exit position early at profit.
+        
+        Exits if both sides can be sold for > initial cost + 15% profit target.
+        This captures opportunities when both sides rise (rare but profitable).
+        
+        Args:
+            market_id: Market identifier
+            up_token: UP token ID
+            down_token: DOWN token ID
+        
+        Returns:
+            True if position was closed early
+        """
+        position = self.pm.get_position(market_id)
+        if not position:
+            return False
+        
+        # Don't exit too early - need at least 2 minutes to allow price discovery
+        entry_time = position.get("up", {}).get("entry_time", 0)
+        time_in_position = time.time() - entry_time
+        if time_in_position < 120:
+            return False
+        
+        # Get current prices
+        up_price = self.monitor.get_last_price(up_token) or 0.50
+        down_price = self.monitor.get_last_price(down_token) or 0.50
+        
+        # Calculate potential exit value (apply EARLY_EXIT_PRICE_ADJUSTMENT to account for spread)
+        up_size = position.get("up", {}).get("size", 0)
+        down_size = position.get("down", {}).get("size", 0)
+        exit_value = (
+            (up_price * EARLY_EXIT_PRICE_ADJUSTMENT * up_size)
+            + (down_price * EARLY_EXIT_PRICE_ADJUSTMENT * down_size)
+        )
+        
+        total_cost = position.get("total_cost", 0)
+        total_received = position.get("total_received", 0)
+        net_cost = total_cost - total_received
+        
+        if net_cost <= 0:
+            return False
+        
+        # Exit if we can lock in EARLY_EXIT_PROFIT_THRESHOLD (15%+) profit
+        target_value = net_cost * (1 + EARLY_EXIT_PROFIT_THRESHOLD)
+        
+        if exit_value >= target_value:
+            potential_pnl = exit_value - net_cost
+            logger.info(
+                f"💰 Early exit opportunity detected for {market_id}:\n"
+                f"   Exit value: ${exit_value:.2f}\n"
+                f"   Net cost: ${net_cost:.2f}\n"
+                f"   Potential P&L: ${potential_pnl:.2f} ({potential_pnl/net_cost*100:.1f}%)\n"
+                f"   Time in position: {time_in_position:.0f}s"
+            )
+            
+            # Sell both sides with price adjustment to ensure fill
+            up_result = await self.pm._place_order(
+                up_token, up_price * EARLY_EXIT_PRICE_ADJUSTMENT, up_size, "SELL"
+            )
+            down_result = await self.pm._place_order(
+                down_token, down_price * EARLY_EXIT_PRICE_ADJUSTMENT, down_size, "SELL"
+            )
+            
+            if up_result.get("success") and down_result.get("success"):
+                # Calculate actual P&L
+                up_proceeds = up_result.get("cost", 0)    # Negative (received)
+                down_proceeds = down_result.get("cost", 0)  # Negative (received)
+                actual_exit_value = -up_proceeds - down_proceeds
+                
+                pnl = actual_exit_value + total_received - total_cost
+                
+                # Update bankroll and close position
+                self.pm.update_bankroll(pnl)
+                self.pm.close_position(market_id)
+                
+                logger.info(f"✅ Early exit successful: P&L=${pnl:+.2f}")
+                await self.notifier.notify_pnl(pnl, self.pm.get_current_bankroll())
+                
+                return True
+            else:
+                logger.warning("⚠️ Early exit orders failed, position remains open")
+        
+        return False
     
     async def _report_stats_periodically(self) -> None:
         """Report stats every 30 minutes."""
@@ -478,6 +575,13 @@ class DeltaNeutralScalpingStrategy:
                 for market in self.active_markets:
                     try:
                         await self._process_market(market)
+                        
+                        # Check for early exit opportunities on open positions
+                        market_id = market.get("condition_id") or market.get("window", "")
+                        up_token = market.get("up_token", "")
+                        down_token = market.get("down_token", "")
+                        if up_token and down_token:
+                            await self._check_early_exit(market_id, up_token, down_token)
                     except Exception as e:
                         logger.error(f"Error processing market {market}: {e}")
                         import traceback

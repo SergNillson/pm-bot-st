@@ -149,7 +149,7 @@ class DeltaHedger:
 
         if time_elapsed > 210:  # More than 3.5 minutes elapsed → last 90 seconds
             time_remaining = 300 - time_elapsed
-            logger.info(
+            logger.debug(
                 f"🚫 Anti-hedge window: {time_remaining:.0f}s до settlement - "
                 f"позволяем mean reversion сработать естественно"
             )
@@ -172,7 +172,7 @@ class DeltaHedger:
         relative_delta = abs(delta) / total_value
         time_remaining = 300 - time_elapsed
         
-        logger.info(
+        logger.debug(
             f"⚖️ Hedge check: delta={delta:.4f} ({relative_delta:.1%}) | "
             f"elapsed={time_elapsed:.0f}s | remaining={time_remaining:.0f}s | "
             f"threshold={HEDGE_THRESHOLD:.1%}"

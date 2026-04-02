@@ -270,6 +270,10 @@ class DeltaNeutralScalpingStrategy:
         
         Returns True if OK to continue trading, False if should pause.
         """
+        # Skip in dry-run mode - collect stats without interruption
+        if self.dry_run:
+            return True
+        
         if self.daily_start_bankroll <= 0:
             return True
         daily_loss_pct = (self.daily_start_bankroll - self.pm.bankroll) / self.daily_start_bankroll
@@ -286,6 +290,10 @@ class DeltaNeutralScalpingStrategy:
         
         Returns True if OK to continue, False if should pause.
         """
+        # Skip in dry-run mode - collect 20+ trades before evaluating
+        if self.dry_run:
+            return True
+        
         win_rate = self.pm.get_win_rate()
         total_trades = self.pm.wins + self.pm.losses
         

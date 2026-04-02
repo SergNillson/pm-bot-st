@@ -468,9 +468,9 @@ class TestDeltaHedger:
         stats = hedger.get_hedge_stats()
         assert stats["hedge_count"] == 0
 
-    def test_hedge_threshold_is_five_percent(self):
+    def test_hedge_threshold_is_twenty_five_percent(self):
         from strategies.modules.delta_hedger import HEDGE_THRESHOLD
-        assert HEDGE_THRESHOLD == pytest.approx(0.05)
+        assert HEDGE_THRESHOLD == pytest.approx(0.25)
 
     @pytest.mark.asyncio
     async def test_rebalance_records_hedge_transactions(self):
@@ -489,8 +489,9 @@ class TestDeltaHedger:
         assert result is True
         position = pm.get_position("market_1")
         assert position is not None
+        # Optimized rebalance: sell-only, so hedge_sells has 1 entry and hedge_buys is empty
         assert len(position.get("hedge_sells", [])) == 1
-        assert len(position.get("hedge_buys", [])) == 1
+        assert len(position.get("hedge_buys", [])) == 0
 
 
 # ============================================================================

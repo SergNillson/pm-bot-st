@@ -11,10 +11,12 @@ from strategies.modules.odds_monitor import OddsMonitor
 
 logger = logging.getLogger(__name__)
 
-# Hedging parameters
-HEDGE_THRESHOLD = 0.05   # Rebalance when delta > 5% of total value
-SELL_FRACTION = 0.40     # Sell 40% of overweight side
-BUY_FRACTION = 1.20      # Buy 120% on underweight side
+# Hedging parameters - OPTIMIZED FOR PROFITABILITY
+HEDGE_THRESHOLD = 0.25          # Rebalance when delta > 25% (was 5%) - much less frequent
+SELL_FRACTION = 0.50            # Sell 50% of overweight side (was 40%) - capture more profit
+BUY_FRACTION = 1.00             # Kept for reference only - buy side is DISABLED in sell-only strategy
+MAX_HEDGES_PER_POSITION = 1     # Maximum 1 hedge per position to cap spread costs
+MIN_HEDGE_COOLDOWN = 90         # 90 seconds between hedges (was 20) - prevent overtrading
 
 
 class DeltaHedger:
@@ -25,8 +27,8 @@ class DeltaHedger:
     
     Delta = pos_up.value - pos_down.value
     When |delta| > HEDGE_THRESHOLD * total_value:
-        - Sell 60% of overweight side
-        - Buy 150% on underweight side
+        - Sell 50% of overweight side ONLY (no buy on underweight)
+        - At most MAX_HEDGES_PER_POSITION hedges per position
     """
     
     def __init__(self, bot, websocket_client, position_manager, clob_client=None):
@@ -125,17 +127,26 @@ class DeltaHedger:
         if not position:
             return False
         
-        # Check cooldown (don't hedge more than once per 20 seconds)
-        last_hedge_time = position.get("last_hedge_time", 0)
-        if time.time() - last_hedge_time < 20:
+        # Check hedge count limit - cap at MAX_HEDGES_PER_POSITION to prevent runaway costs
+        hedge_count = position.get("hedge_count", 0)
+        if hedge_count >= MAX_HEDGES_PER_POSITION:
+            logger.debug(
+                f"Max hedges reached ({MAX_HEDGES_PER_POSITION}), "
+                f"skipping further rebalancing for {market_id}"
+            )
             return False
         
-        # Don't hedge if less than 60 seconds remain in the window
+        # Check cooldown (don't hedge more than once per MIN_HEDGE_COOLDOWN seconds)
+        last_hedge_time = position.get("last_hedge_time", 0)
+        if time.time() - last_hedge_time < MIN_HEDGE_COOLDOWN:
+            return False
+        
+        # Don't hedge if less than 30 seconds remain in the window
         # Default to time.time() so positions without entry_time are always eligible
         entry_time = position.get("up", {}).get("entry_time", time.time())
         time_elapsed = time.time() - entry_time
 
-        if time_elapsed > 240:  # More than 4 minutes elapsed (5min window)
+        if time_elapsed > 270:  # More than 4.5 minutes elapsed (5min window)
             logger.debug("Too close to settlement, skipping hedge")
             return False
         
@@ -197,81 +208,62 @@ class DeltaHedger:
     ) -> None:
         """Execute rebalancing trades.
         
-        Sells 60% of overweight side and buys 150% on underweight side.
+        OPTIMIZED: Only sells overweight side, doesn't buy underweight.
+        This captures profit from mean reversion without paying double spreads.
         
         Args:
             overweight_token: Token to reduce
-            underweight_token: Token to increase
+            underweight_token: Token to increase (NOT USED in optimized version)
             overweight_size: Current size of overweight position
-            underweight_size: Current size of underweight position
+            underweight_size: Current size of underweight position (IGNORED)
             market_id: Market identifier for position updates
         """
-        # Calculate trade sizes
+        # Calculate sell size only - no buy on underweight side
         sell_size = overweight_size * SELL_FRACTION
-        buy_size = (underweight_size * BUY_FRACTION) - underweight_size
         
         if sell_size < 0.50:
             logger.debug(f"Sell size too small ({sell_size:.2f}), skipping rebalance")
             return
         
         logger.info(
-            f"Rebalancing: SELL {sell_size:.2f} overweight, "
-            f"BUY {buy_size:.2f} underweight"
+            f"Rebalancing: SELL {sell_size:.2f} overweight @ current price, "
+            f"NOT buying underweight (let position settle naturally)"
         )
         
-        # Get current prices
+        # Get current price for overweight side
         overweight_price = self.get_price(overweight_token)
-        underweight_price = self.get_price(underweight_token)
         
-        # Execute sell on overweight side
+        # Execute sell on overweight side ONLY
         sell_result = await self.pm._place_order(
             overweight_token, overweight_price, sell_size, "SELL"
         )
         
         if sell_result.get("success"):
-            # Execute buy on underweight side
-            buy_result = await self.pm._place_order(
-                underweight_token, underweight_price, buy_size, "BUY"
-            )
-            
             self.hedge_count += 1
+            logger.info(f"✅ Rebalanced successfully (hedge #{self.hedge_count}) - SELL ONLY strategy")
             
-            if buy_result.get("success"):
-                logger.info(f"✅ Rebalanced successfully (hedge #{self.hedge_count})")
+            # UPDATE POSITION SIZES AFTER HEDGING
+            position = self.pm.get_position(market_id)
+            if position:
+                # Reduce the sold (overweight) side
+                if position.get("up", {}).get("token") == overweight_token:
+                    position["up"]["size"] -= sell_size
+                else:
+                    position["down"]["size"] -= sell_size
                 
-                # UPDATE POSITION SIZES AFTER HEDGING
-                position = self.pm.get_position(market_id)
-                if position:
-                    # Determine which side is up/down
-                    if position.get("up", {}).get("token") == overweight_token:
-                        # UP was overweight
-                        position["up"]["size"] -= sell_size
-                        position["down"]["size"] += buy_size
-                    else:
-                        # DOWN was overweight
-                        position["down"]["size"] -= sell_size
-                        position["up"]["size"] += buy_size
-                    
-                    logger.debug(
-                        f"Updated position sizes: up={position['up']['size']:.2f}, "
-                        f"down={position['down']['size']:.2f}"
-                    )
-                    
-                    # Track hedge costs.
-                    # _place_order returns cost = -(price*size) for SELL (negative = received),
-                    # so subtracting it adds the received amount to total_received.
-                    sell_cost = sell_result.get("cost", 0)
-                    position["total_received"] -= sell_cost  # sell_cost is negative, so this adds
-                    # _place_order returns cost = price*size for BUY (positive = spent)
-                    position["total_cost"] += buy_result.get("cost", 0)
-                    
-                    # Record hedge transactions for detailed P&L tracking
-                    self.pm.record_hedge_sell(market_id, sell_size, overweight_price)
-                    self.pm.record_hedge_buy(market_id, buy_size, underweight_price)
-            else:
-                logger.warning(
-                    f"⚠️ Sell succeeded but buy failed: {buy_result.get('message', '')}"
+                logger.debug(
+                    f"Updated position sizes: up={position['up']['size']:.2f}, "
+                    f"down={position['down']['size']:.2f}"
                 )
+                
+                # Track hedge revenue.
+                # _place_order returns cost = -(price*size) for SELL (negative = received),
+                # so subtracting it adds the received amount to total_received.
+                sell_cost = sell_result.get("cost", 0)
+                position["total_received"] -= sell_cost  # sell_cost is negative, so this adds
+                
+                # Record hedge transaction
+                self.pm.record_hedge_sell(market_id, sell_size, overweight_price)
         else:
             logger.error(
                 f"❌ Rebalance sell failed: {sell_result.get('message', '')}"
@@ -284,4 +276,6 @@ class DeltaHedger:
             "hedge_threshold": HEDGE_THRESHOLD,
             "sell_fraction": SELL_FRACTION,
             "buy_fraction": BUY_FRACTION,
+            "max_hedges_per_position": MAX_HEDGES_PER_POSITION,
+            "min_hedge_cooldown": MIN_HEDGE_COOLDOWN,
         }

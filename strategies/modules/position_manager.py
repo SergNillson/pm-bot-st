@@ -140,6 +140,8 @@ class PositionManager:
             "total_received": 0.0,  # Total USDC received from sells
             "hedge_sells": [],       # List of (size, price) for hedge sells
             "hedge_buys": [],        # List of (size, price) for hedge buys
+            "hedge_count": 0,        # Number of hedges executed (for limit enforcement)
+            "last_hedge_time": 0,    # Timestamp of last hedge (for cooldown enforcement)
         }
         
         # Accumulate entry costs from straddle orders
@@ -247,6 +249,10 @@ class PositionManager:
             if 'hedge_sells' not in self.positions[market_id]:
                 self.positions[market_id]['hedge_sells'] = []
             self.positions[market_id]['hedge_sells'].append((size, price))
+            # Increment hedge counter to enforce MAX_HEDGES_PER_POSITION limit
+            self.positions[market_id]['hedge_count'] = (
+                self.positions[market_id].get('hedge_count', 0) + 1
+            )
             logger.info(f"Recorded hedge SELL: {size} @ {price:.4f}")
     
     def record_hedge_buy(self, market_id: str, size: float, price: float) -> None:

@@ -389,11 +389,12 @@ class TestDeltaHedger:
     def make_hedger(self, up_price=0.60, down_price=0.40):
         bot = MagicMock()
         ws = MagicMock()
-        ws.get_mid_price.side_effect = lambda t: up_price if "up" in t else down_price
-        pm = PositionManager(bot, ws, initial_capital=40.0)
+        clob = MagicMock()
+        clob.get_price.side_effect = lambda t: up_price if "up" in t else down_price
+        pm = PositionManager(bot, ws, clob_client=clob, initial_capital=40.0)
         pm.dry_run = True
 
-        hedger = DeltaHedger(bot, ws, pm)
+        hedger = DeltaHedger(bot, ws, pm, clob_client=clob)
         return hedger, pm
 
     def test_initialization(self):
@@ -467,9 +468,9 @@ class TestDeltaHedger:
         stats = hedger.get_hedge_stats()
         assert stats["hedge_count"] == 0
 
-    def test_hedge_threshold_is_ten_percent(self):
+    def test_hedge_threshold_is_five_percent(self):
         from strategies.modules.delta_hedger import HEDGE_THRESHOLD
-        assert HEDGE_THRESHOLD == pytest.approx(0.10)
+        assert HEDGE_THRESHOLD == pytest.approx(0.05)
 
     @pytest.mark.asyncio
     async def test_rebalance_records_hedge_transactions(self):

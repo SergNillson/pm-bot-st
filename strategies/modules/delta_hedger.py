@@ -7,10 +7,12 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
+from strategies.modules.odds_monitor import OddsMonitor
+
 logger = logging.getLogger(__name__)
 
 # Hedging parameters
-HEDGE_THRESHOLD = 0.10   # Rebalance when delta > 10% of total value
+HEDGE_THRESHOLD = 0.05   # Rebalance when delta > 5% of total value
 SELL_FRACTION = 0.40     # Sell 40% of overweight side
 BUY_FRACTION = 1.20      # Buy 120% on underweight side
 
@@ -40,11 +42,12 @@ class DeltaHedger:
         self.pm = position_manager
         self.clob = clob_client
         self.hedge_count = 0
+        # Initialize OddsMonitor with the best available CLOB client
+        _clob = clob_client or (getattr(position_manager, 'clob', None))
+        self._odds_monitor = OddsMonitor(_clob) if _clob else None
     
     def get_price(self, token_id: str) -> float:
-        """Get current price for a token.
-        
-        Uses CLOB API if available, otherwise falls back to WebSocket or default.
+        """Get current price for a token using OddsMonitor.
         
         Args:
             token_id: Token ID
@@ -52,17 +55,22 @@ class DeltaHedger:
         Returns:
             Price (0.0-1.0)
         """
+        # Use pre-initialized OddsMonitor (handles caching/rate-limiting)
+        if self._odds_monitor:
+            price = self._odds_monitor.get_last_price(token_id)
+            if price is not None:
+                logger.debug(f"Price from OddsMonitor: {token_id[:8]}... = {price:.4f}")
+                return price
+        
+        # Fallback to CLOB client directly
         if self.clob:
             price = self.clob.get_price(token_id)
             if price is not None:
+                logger.debug(f"Price from CLOB: {token_id[:8]}... = {price:.4f}")
                 return price
         
-        if self.ws and hasattr(self.ws, 'get_mid_price'):
-            price = self.ws.get_mid_price(token_id)
-            if price is not None:
-                return price
-        
-        return 0.50  # Default to 50/50
+        logger.warning(f"⚠️ No price available for {token_id[:8]}..., defaulting to 0.50")
+        return 0.50  # Last resort
     
     def calculate_delta(
         self,

@@ -470,7 +470,7 @@ class TestDeltaHedger:
 
     def test_hedge_threshold_is_twenty_five_percent(self):
         from strategies.modules.delta_hedger import HEDGE_THRESHOLD
-        assert HEDGE_THRESHOLD == pytest.approx(0.25)
+        assert HEDGE_THRESHOLD == pytest.approx(0.15)
 
     @pytest.mark.asyncio
     async def test_rebalance_records_hedge_transactions(self):

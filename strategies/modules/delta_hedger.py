@@ -12,7 +12,8 @@ from strategies.modules.odds_monitor import OddsMonitor
 logger = logging.getLogger(__name__)
 
 # Hedging parameters - OPTIMIZED FOR PROFITABILITY
-HEDGE_THRESHOLD = 0.25          # Rebalance when delta > 25% (was 5%) - much less frequent
+HEDGE_THRESHOLD = 0.15          # Rebalance when delta > 15% - filters normal volatility, catches real spikes
+# Based on log analysis: 10.7% delta → -$0.71 loss (premature hedge); 27% delta is valid signal
 SELL_FRACTION = 0.50            # Sell 50% of overweight side (was 40%) - capture more profit
 BUY_FRACTION = 1.00             # Kept for reference only - buy side is DISABLED in sell-only strategy
 MAX_HEDGES_PER_POSITION = 1     # Maximum 1 hedge per position to cap spread costs
@@ -141,13 +142,17 @@ class DeltaHedger:
         if time.time() - last_hedge_time < MIN_HEDGE_COOLDOWN:
             return False
         
-        # Don't hedge if less than 30 seconds remain in the window
+        # Don't hedge in the last 90 seconds of the window - mean reversion is strongest here
         # Default to time.time() so positions without entry_time are always eligible
         entry_time = position.get("up", {}).get("entry_time", time.time())
         time_elapsed = time.time() - entry_time
 
-        if time_elapsed > 270:  # More than 4.5 minutes elapsed (5min window)
-            logger.debug("Too close to settlement, skipping hedge")
+        if time_elapsed > 210:  # More than 3.5 minutes elapsed → last 90 seconds
+            time_remaining = 300 - time_elapsed
+            logger.info(
+                f"🚫 Anti-hedge window: {time_remaining:.0f}s до settlement - "
+                f"позволяем mean reversion сработать естественно"
+            )
             return False
         
         up_size = position.get("up", {}).get("size", 0)
@@ -165,6 +170,13 @@ class DeltaHedger:
             return False
         
         relative_delta = abs(delta) / total_value
+        time_remaining = 300 - time_elapsed
+        
+        logger.info(
+            f"⚖️ Hedge check: delta={delta:.4f} ({relative_delta:.1%}) | "
+            f"elapsed={time_elapsed:.0f}s | remaining={time_remaining:.0f}s | "
+            f"threshold={HEDGE_THRESHOLD:.1%}"
+        )
         
         if relative_delta > HEDGE_THRESHOLD:
             logger.info(
